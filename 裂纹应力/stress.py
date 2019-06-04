@@ -8,6 +8,7 @@ from cast_heat import two_densonal_diff
 from cast_heat import steady_temp_cal
 from crack import crack
 import numpy as np
+import math
 var_ZNumber = 500 # 拉坯方向网格划分的数量
 var_XNumber=20 # 铸坯厚度方向的网格点数
 var_X=0.16 # 铸坯厚度
@@ -84,7 +85,7 @@ def u(t):
 def a(t):
     aa = (0.435 + 0.000708 * t) * 0.00001
     return aa
-def area(ie,xy):
+def area(ie,lnd,xy):
     i=lnd[ie][0]#i.j.k代表节点号
     j=lnd[ie][1]
     k=lnd[ie][2]
@@ -96,7 +97,7 @@ def betaf(ie,t):#这部分有疑问待解决
     return beta
     
 #计算弹朔性矩阵
-def md(ie,t):
+def md(ie,t):#这里的t是温度单个单元的温度
     beta = betaf(ie, t)
     d=[[0 for i in range(3)] for j in range(3)]
     d[0][0]=2+beta
@@ -128,11 +129,11 @@ def mb(ie,lnd,xy):#ie代表的是单元序号
     b[2][3]= b[0][2]
     b[2][4]= b[1][5]
     b[2][5]= b[0][4]
-    #s=area(ie,xy)
-    s=0.5
+    s=area(ie,lnd,xy)
+    #s=0.5
     for ii in range(3):
         for jj in range(6):
-            b[ii][jj]=s*b[ii][jj]/2
+            b[ii][jj]=b[ii][jj]/(2*s)
     return b
 #求解单元刚度矩阵
 def mke(ie,t,lnd,xy,kk):#kk代表当前时间切片,这里的t是温度场
@@ -240,21 +241,72 @@ def heatload(t,kk,lnd,xy,unit,kk1,m):#t,kk为温度场和时间切片,kk1为段�
         p[2*k+1]=p[2*k+1]+load*(xy[j][0]-xy[i][0])
     
     return p
+def strain_stress(t,strain):
+    if t<1100:#貌似没啥子用
+        estrain = 0.000484 - 0.000000368 * t
+    else:
+        estrain = 0.000147 - 0.00000008 * t
+    estrain = 0.00161 - 0.000000756 * t#这个有用
+    if strain < estrain:
+        stress = Ee(t) * strain
+    else:
+        stress = Ee(t) * estrain + (strain - estrain) * 0.1 * Ee(t)
+    return stress          
+    
 #求解节点位移
-def x_jd_weiyi(nx,ny,dx,dy,t,kk,kk1):
-    lnd,xy,unit,m=lnd_xy_creack(20,20,0.1,0.1)
+def solver(nx,ny,dx,dy,t,kk,kk1):
+    lnd,xy,unit,m=lnd_xy_creack(nx,ny,dx,dy)
     mk1=mk(unit,m,t,lnd,xy,kk)
     pp=heatload(t,kk,lnd,xy,unit,kk1,m)
     k=np.array(mk1)
+    #print(k)
     p=np.array(pp)
-    wx=(np.linalg.inv(k)).dot(p.reshape(p.shape[0],1))
-    return wx
-#print(wx)
-#for kk in range(1890,1920):
-#    print(kk)
-#    x_jd_weiyi(20,20,0.1,0.1,t,kk,1900)
-x_jd_weiyi(20,20,0.1,0.1,t,1806,1900)
-
+    #求解节点位移
+    wx=(np.linalg.pinv(k)).dot(p.reshape(p.shape[0],1))
+    tpkk=t[kk]
+    tpkk1=t[kk1]
+    xe=[0 for i in range(6)]#创建节点位移
+    stress=[0 for i in range(unit)]#单元应变
+    strain=[0 for i in range(unit)]#单元应力
+    estress=[[0 for i in range(2)] for j in range(unit)]
+    print(unit)
+    for ie in range (unit):
+        i=lnd[ie][0]#i.j.k代表节点号
+        j=lnd[ie][1]
+        k=lnd[ie][2]
+        te=tpkk[xy[i][2]][xy[i][3]]
+        te+=tpkk[xy[j][2]][xy[j][3]]
+        te+=tpkk[xy[k][2]][xy[k][3]]
+        te=te/3.0
+        te1=tpkk1[xy[i][2]][xy[i][3]]
+        te1+=tpkk1[xy[j][2]][xy[j][3]]
+        te1+=tpkk1[xy[k][2]][xy[k][3]]
+        te1=te/3.0
+        b=mb(ie,lnd,xy)#3*6的矩阵
+        xe[0]=wx[2*i]
+        xe[1]=wx[2*i+1]
+        xe[2]=wx[2*j]
+        xe[3]=wx[2*j+1]
+        xe[4]=wx[2*k]
+        xe[5]=wx[2*k+1]
+        xe=np.array(xe)
+        stress[ie]=np.array(b).dot(xe.reshape(xe.shape[0],1))
+        #beta = betaf(ie, te)
+        ybx=stress[ie][0]#x方向的应变
+        yby=stress[ie][1]#y方向的应变
+        ybxy=stress[ie][2]#切方向的应变
+        #ybx=-1*(1-beta)/(1+2*beta)*(ybx+yby)#z方向的应变
+        ybz=-u(te)/(1-u(te))*(ybx+yby)#z方向的应变
+        #等效应变
+        estress[ie][0]=math.sqrt(math.pow(ybx-yby,2)+ math.pow(yby-ybz,2) + math.pow(ybz-ybx,2) + 1.5 * math.pow(ybxy,2))/ (1 + u(te)) / math.sqrt(2)
+        #等效应力
+        estress[ie][1] = strain_stress(te,estress[ie][0])
+        d=md(ie,te)
+        strain[ie]=np.array(d).dot(stress[ie])
+    return stress,estress,strain
+    
+stress,estress,strain=solver(20,20,0.1,0.1,t,1500,1900)#计算节点位移
+print(stress[500],estress[500],strain[500])
 
 
 
